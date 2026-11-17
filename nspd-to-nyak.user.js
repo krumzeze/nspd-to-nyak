@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         НСПД → НЯК
 // @namespace    nspd-to-nyak
-// @version      0.1.0
+// @version      0.2.0
 // @description  Сохраняет здания, сооружения и адреса с nspd.gov.ru в CSV и GeoJSON
 // @match        https://nspd.gov.ru/*
 // @updateURL    https://raw.githubusercontent.com/krumzeze/nspd-to-nyak/main/nspd-to-nyak.user.js
@@ -87,16 +87,22 @@
   // ---------- addresses ----------
 
   const W = '(?![А-Яа-яЁёA-Za-z])';
-  const HOUSE_RE = new RegExp(
-    `^(?:(?:д|дом|зд|здание|двлд|влд|владение|уч|уч-к|участок|з/у|стр|строение|гараж)${W}\\.?\\s*)?(?:№\\s*)?(\\d+\\s?[А-Яа-яЁё]?(?:[/-][\\dА-Яа-яЁё]+)*)(?:\\s*(?:зд|д)\\.?)?$`,
-    'i'
+  const NUM = '\\d+(?:\\s?[А-Яа-яЁё](?![А-Яа-яЁё.]))?(?:[/-][\\dА-Яа-яЁё]+)*';
+  const HOUSE_TOKEN_RE = new RegExp(
+    '\\s*(?:' +
+      `(?:литера|литер|литреа|лит)${W}\\.?\\s*([А-ЯЁA-Z\\d]{1,3})${W}` +
+      `|(?:корпус|корп|к)${W}\\.?\\s*(\\d+[А-Яа-яЁё]?)${W}` +
+      `|(?:строение|стр|с)${W}\\.?\\s*(\\d+[А-Яа-яЁё]?)${W}` +
+      `|(?:(?:дом|д|зд|здание|двлд|влд|владение|уч-к|уч|участок|з/у|гараж|сооружение|соор)${W}\\.?\\s*)?(?:№\\s*)?(${NUM})(?:\\s*(?:зд|д)\\.?)?` +
+    ')\\s*',
+    'iy'
   );
   const STREET_RE = new RegExp(
-    `^(ул|улица|пер|переулок|пр-кт|проспект|пр-д|проезд|пл|площадь|ш|шоссе|б-р|бульвар|туп|тупик|наб|набережная|мкр|микрорайон|кв-л|квартал|тер|территория|снт|днт|дск|днп|онт|сот|спк|ст|со|с/о|гск|гк|дс|кп|линия|аллея|ряд)${W}`,
+    `^(ул|улица|пер|переулок|пр-кт|проспект|пр-д|проезд|пл|площадь|ш|шоссе|б-р|бульвар|туп|тупик|наб|набережная|мкр|микрорайон|кв-л|квартал|тер|территория|парк|сад|снт|днт|дск|днп|онт|сот|спк|ст|со|с/о|гск|гк|дс|кп|линия|аллея|ряд)${W}`,
     'i'
   );
   const PLACE_RE = new RegExp(
-    `^(российская федерация|республика|респ${W}|рт${W}|м\\.р-н|р-н|муниципальный|мо${W}|г\\.п|с\\.п|городское|сельское|г${W}|город|с${W}|село|д${W}|деревня|п${W}|пос|поселок|посёлок|рп${W}|пгт${W}|х${W}|хутор|\\d{6})`,
+    `^(российская федерация|республика|респ${W}|рт${W}|м\\.р-н|р-н|муниципальный|внутригородское|вн\\.тер|мо${W}|г\\.п|с\\.п|городское|сельское|г${W}|город|с${W}|село|д${W}|деревня|п${W}|пос|поселок|посёлок|рп${W}|пгт${W}|х${W}|хутор|\\d{6})`,
     'i'
   );
   const ABBR = [
@@ -130,14 +136,38 @@
     return s;
   }
 
-  function shortAddress(addr) {
-    const parts = addr.replace(/\.$/, '').split(',').map(cleanSpaces).filter(Boolean);
-    let house = null, hi = -1;
-    for (let i = parts.length - 1; i >= 0; i--) {
-      const m = parts[i].match(HOUSE_RE);
-      if (m) { house = m[1].replace(/\s/g, '').replace(/-/g, '/').toUpperCase(); hi = i; break; }
+  function parseHouseSegment(seg, acc) {
+    HOUSE_TOKEN_RE.lastIndex = 0;
+    const found = {};
+    while (HOUSE_TOKEN_RE.lastIndex < seg.length) {
+      const m = HOUSE_TOKEN_RE.exec(seg);
+      if (!m || m[0] === '') return false;
+      if (m[1]) found.lit = m[1];
+      if (m[2]) found.korp = m[2];
+      if (m[3]) found.str = m[3];
+      if (m[4]) found.num = m[4];
     }
-    if (!house) return null;
+    for (const k in found) if (!acc[k]) acc[k] = found[k];
+    return true;
+  }
+
+  function formatHouse({ num, korp, str, lit }) {
+    let h = num.replace(/\s/g, '').toUpperCase();
+    if (/[А-ЯЁ]/.test(h)) h = h.replace(/-/g, '/');
+    if (korp) h += 'к' + korp.toUpperCase();
+    if (str) h += 'с' + str.toUpperCase();
+    if (lit) h += ' лит.' + lit.toUpperCase();
+    return h;
+  }
+
+  function shortAddress(addr) {
+    const parts = addr.replace(/\([^()]*\)/g, ' ').replace(/\.$/, '').split(',').map(cleanSpaces).filter(Boolean);
+    const acc = {};
+    let hi = parts.length;
+    while (hi > 0 && parseHouseSegment(parts[hi - 1], acc)) hi--;
+    if (!acc.num && acc.str) { acc.num = acc.str; delete acc.str; }
+    if (!acc.num) return null;
+    const house = formatHouse(acc);
     let street = null;
     for (let i = hi - 1; i >= 0; i--) {
       const p = parts[i];
