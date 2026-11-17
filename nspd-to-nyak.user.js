@@ -4,6 +4,8 @@
 // @version      0.1.0
 // @description  Сохраняет здания, сооружения и адреса с nspd.gov.ru в CSV и GeoJSON
 // @match        https://nspd.gov.ru/*
+// @updateURL    https://raw.githubusercontent.com/krumzeze/nspd-to-nyak/main/nspd-to-nyak.user.js
+// @downloadURL  https://raw.githubusercontent.com/krumzeze/nspd-to-nyak/main/nspd-to-nyak.user.js
 // @run-at       document-start
 // @grant        none
 // ==/UserScript==
