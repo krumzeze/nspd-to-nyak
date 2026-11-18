@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         НСПД → НЯК
 // @namespace    nspd-to-nyak
-// @version      0.4.0
+// @version      0.5.0
 // @description  Сохраняет здания, сооружения и адреса с nspd.gov.ru в CSV и GeoJSON
 // @match        https://nspd.gov.ru/*
 // @updateURL    https://raw.githubusercontent.com/krumzeze/nspd-to-nyak/main/nspd-to-nyak.user.js
@@ -105,21 +105,6 @@
     `^(российская федерация|республика|респ${W}|рт${W}|м\\.р-н|р-н|муниципальный|внутригородское|вн\\.тер|мо${W}|г\\.п|с\\.п|городское|сельское|г${W}|город|с${W}|село|д${W}|деревня|п${W}|пос|поселок|посёлок|рп${W}|пгт${W}|х${W}|хутор|\\d{6})`,
     'i'
   );
-  const ABBR = [
-    [/^улица(?=\s)/i, 'ул'],
-    [/^переулок(?=\s)/i, 'пер'],
-    [/^проспект(?=\s)/i, 'пр-кт'],
-    [/^площадь(?=\s)/i, 'пл'],
-    [/^проезд(?=\s)/i, 'пр-д'],
-    [/^(?:тер\.?|территория)\s+(?=\S)/i, ''],
-    [/^дачно-садоводческое и огородническое (?:некоммерческое )?то+варищество/i, 'ДС и ОНТ'],
-    [/^садоводческое некомм?ерческое товарищество/i, 'СНТ'],
-    [/^садоводческий потребительский кооператив/i, 'СПК'],
-    [/^(?:садоводческое товарищество|садов\.\s*тов\.|с\/т\.?)(?=\s)/i, 'СТ'],
-    [/^(?:садоводческое общество|с\/о)/i, 'СО'],
-    [/^ДСиОНТ/i, 'ДС и ОНТ'],
-    [/^(СНТ|ДНТ|СТ|СО|СПК|ДС и ОНТ)\.?\s+(?:\1\.?\s+)?/i, (m, t) => t.toUpperCase().replace('ДС И ОНТ', 'ДС и ОНТ') + ' '],
-  ];
   const SETTLEMENT_RE = new RegExp(`^(с|село|д|деревня|п|пос|поселок|посёлок|х|хутор)${W}`, 'i');
 
   function cleanSpaces(s) {
@@ -131,9 +116,7 @@
   }
 
   function normalizeStreet(s) {
-    s = cleanSpaces(s.replace(/[«»"“”]/g, ' '));
-    for (const [re, to] of ABBR) s = cleanSpaces(s.replace(re, to));
-    return s;
+    return cleanSpaces(s.replace(/[«»"“”]/g, ' '));
   }
 
   function parseHouseSegment(seg, acc) {
@@ -147,6 +130,7 @@
       if (m[3]) found.str = m[3];
       if (m[4]) found.num = m[4];
     }
+    if (found.num && acc.num) return false;
     for (const k in found) if (!acc[k]) acc[k] = found[k];
     return true;
   }
@@ -181,45 +165,111 @@
     return `${house}  ${normalizeStreet(street)}`;
   }
 
-  // ---------- replacements ----------
+  // ---------- rules ----------
 
-  const RULES_KEY = 'nspdToNyak.rulesText';
-  const RULES_HELP = '# Одна строка — одно правило: что заменить => на что заменить\n# Пустая правая часть удаляет текст. Строки с # не учитываются.\n';
+  const RULES_KEY = 'nspdToNyak.rules.v2';
+  const OLD_RULES_KEY = 'nspdToNyak.rulesText';
+  const DEFAULT_RULES = `# Правила обработки адреса перед разбором на номер дома и улицу.
+# Применяются сверху вниз. Полный адрес в CSV остаётся как в реестре.
+#
+#   что заменить => на что заменить        простая замена
+#   " с пробелами " => ", "                 кавычки сохраняют пробелы по краям
+#   re: шаблон => замена                    регулярное выражение, $1 или \\1 — группа
+#   re/i: шаблон => замена                  то же без учёта регистра
+#   пропустить: текст                       выкинуть объект, если в адресе есть текст
+#   пропустить re: шаблон                   выкинуть, если адрес подходит под шаблон
+#   пропустить без: текст                   выкинуть, если текста в адресе нет
+#   пропустить без re: шаблон               выкинуть, если адрес не подходит под шаблон
+
+re/i: \\bулица\\b => ул
+re/i: \\bпереулок\\b => пер
+re/i: \\bпроспект\\b => пр-кт
+re/i: \\bплощадь\\b => пл
+re/i: \\bпроезд\\b => пр-д
+re/i: \\b(?:тер\\.?|территория) +(?=\\S) => ""
+re/i: \\bдачно-садоводческое и огородническое (?:некоммерческое )?то+варищество\\b => ДС и ОНТ
+re/i: \\bсадоводческое некомм?ерческое товарищество\\b => СНТ
+re/i: \\bсадоводческий потребительский кооператив\\b => СПК
+re/i: \\bсадовое товарищество\\b => СТ
+re/i: (?:\\bсадоводческое товарищество\\b|\\bсадов\\.\\s*тов\\.|\\bс/т\\.?)(?= ) => СТ
+re/i: (?:\\bсадоводческое общество\\b|\\bс/о\\b) => СО
+re/i: \\bДСиОНТ\\b => ДС и ОНТ
+re/i: \\b(СНТ|ДНТ|СТ|СО|СПК)\\.? +\\1\\b\\.? => $1
+re/i: \\b(СНТ|ДНТ|СПК)\\. => $1
+re: \\bснт\\b => СНТ
+`;
+
+  const WORD = '[\\p{L}\\p{N}_]';
+  const UNICODE_B = `(?:(?<=${WORD})(?!${WORD})|(?<!${WORD})(?=${WORD}))`;
+
+  function unquote(v) {
+    const m = v.match(/^"(.*)"$/s);
+    return m ? m[1] : v;
+  }
+
+  function compileRe(pattern, flags) {
+    if (/\\b/.test(pattern)) return new RegExp(pattern.replace(/\\b/g, UNICODE_B), flags + 'u');
+    return new RegExp(pattern, flags);
+  }
 
   function parseRules(text) {
-    const rules = [];
-    for (const line of text.replace(/^﻿/, '').split(/\r?\n/)) {
-      if (!line.trim() || line.trim().startsWith('#')) continue;
-      const m = line.match(/^(.*?)(?: ?=> ?|\t|;)(.*)$/);
-      if (m && m[1].trim()) rules.push([m[1], m[2]]);
+    const rules = [], errors = [];
+    text.replace(/^﻿/, '').split(/\r?\n/).forEach((line, i) => {
+      if (!line.trim() || line.trim().startsWith('#')) return;
+      try {
+        let m;
+        if ((m = line.match(/^\s*пропустить( без)?( re)?:\s?(.*)$/i))) {
+          const neg = !!m[1], value = unquote(m[3]);
+          if (!value) throw new Error('пустое условие');
+          const re = m[2] ? compileRe(value, '') : null;
+          const has = re ? (s) => re.test(s) : (s) => s.includes(value);
+          rules.push({ skip: neg ? (s) => !has(s) : has });
+        } else if ((m = line.match(/^\s*re(\/i)?:\s?(.*?) => ?(.*)$/i))) {
+          const to = unquote(m[3]).replace(/\$/g, '$$$$').replace(/\\(\d)/g, '$$$1').replace(/\$\$(\d)/g, '$$$1');
+          rules.push({ re: compileRe(unquote(m[2]), m[1] ? 'gi' : 'g'), to });
+        } else if ((m = line.match(/^("[^"]*"|.*?)(?: ?=> ?|\t|;)("[^"]*"|.*)$/)) && unquote(m[1])) {
+          rules.push({ from: unquote(m[1]), to: unquote(m[2]) });
+        } else {
+          throw new Error('не понял правило');
+        }
+      } catch (e) {
+        errors.push(`Строка ${i + 1}: ${e.message}`);
+      }
+    });
+    return { rules, errors };
+  }
+
+  function processAddress(s, rules = state.rules.rules) {
+    for (const r of rules) {
+      if (r.skip) { if (r.skip(s)) return null; }
+      else if (r.re) s = s.replace(r.re, r.to);
+      else s = s.split(r.from).join(r.to);
     }
-    return rules;
+    return s;
   }
 
-  function applyRules(s, rules = state.replacements.rules) {
-    if (!s) return s;
-    for (const [from, to] of rules) s = s.split(from).join(to);
-    return cleanSpaces(s);
-  }
-
-  function applyRulesShort(s, rules = state.replacements.rules) {
-    if (!s) return s;
-    const i = s.indexOf('  ');
-    if (i < 0) return applyRules(s, rules);
-    return `${applyRules(s.slice(0, i), rules)}  ${applyRules(s.slice(i + 2), rules)}`;
+  function addressRow(raw, rules) {
+    const processed = processAddress(raw, rules);
+    if (processed == null) return { skipped: true };
+    return { short: shortAddress(cleanSpaces(processed)) };
   }
 
   function setRulesText(text) {
-    state.replacements = { text, rules: parseRules(text) };
+    state.rules = { text, ...parseRules(text) };
     try { localStorage.setItem(RULES_KEY, text); } catch (e) { /* ignore */ }
     renderRules();
     render();
   }
 
-  state.replacements = (() => {
-    let text = RULES_HELP;
-    try { text = localStorage.getItem(RULES_KEY) ?? RULES_HELP; } catch (e) { /* ignore */ }
-    return { text, rules: parseRules(text) };
+  state.rules = (() => {
+    let text = DEFAULT_RULES;
+    try {
+      const saved = localStorage.getItem(RULES_KEY);
+      const old = localStorage.getItem(OLD_RULES_KEY);
+      if (saved != null) text = saved;
+      else if (old && parseRules(old).rules.length) text = DEFAULT_RULES + '\n# Ваши правила из прошлой версии\n' + old;
+    } catch (e) { /* ignore */ }
+    return { text, ...parseRules(text) };
   })();
 
   function previewSamples(limit) {
@@ -229,7 +279,7 @@
       if (!cats.has(f.properties.category)) continue;
       const raw = fullAddress(f.properties.options || {});
       if (!raw) continue;
-      out.push({ raw, short: shortAddress(raw) });
+      out.push(raw);
       if (out.length >= limit) break;
     }
     return out;
@@ -243,43 +293,49 @@
 
     const title = document.createElement('div');
     title.style.cssText = 'font-weight:bold;font-size:15px';
-    title.textContent = 'Автозамена';
+    title.textContent = 'Правила обработки адресов';
 
     const hint = document.createElement('div');
     hint.style.color = '#555';
-    hint.textContent = 'Пишите по правилу на строку: что заменить => на что заменить. Справа видно, как изменятся адреса из текущей выборки.';
+    hint.textContent = 'Правила применяются сверху вниз, подсказка по формату в начале списка. Справа видно, что получится с адресами из текущей выборки.';
 
     const cols = document.createElement('div');
     cols.style.cssText = 'display:flex;gap:10px;min-height:0;flex:1';
 
     const area = document.createElement('textarea');
-    area.value = state.replacements.text;
+    area.value = state.rules.text;
     area.spellcheck = false;
     area.style.cssText = 'flex:1;min-height:320px;padding:8px;border:1px solid #bbb;border-radius:6px;font:13px monospace;resize:vertical';
 
     const preview = document.createElement('div');
     preview.style.cssText = 'flex:1;min-height:320px;max-height:60vh;overflow:auto;padding:8px;border:1px solid #eee;border-radius:6px;background:#fafafa;font-size:12px';
 
-    const samples = previewSamples(40);
+    const samples = previewSamples(60);
     function updatePreview() {
-      const rules = parseRules(area.value);
+      const { rules, errors } = parseRules(area.value);
       preview.textContent = '';
+      for (const e of errors) {
+        const d = document.createElement('div');
+        d.style.cssText = 'color:#c62828;font-weight:bold;padding:2px 0';
+        d.textContent = e;
+        preview.append(d);
+      }
       if (!samples.length) {
-        preview.textContent = 'Сначала выделите объекты на карте, тогда здесь появятся примеры.';
+        preview.append('Сначала выделите объекты на карте, тогда здесь появятся примеры.');
         return;
       }
-      for (const s of samples) {
+      for (const raw of samples) {
+        const res = addressRow(raw, rules);
         const row = document.createElement('div');
         row.style.cssText = 'padding:4px 0;border-bottom:1px solid #eee';
-        const full = applyRules(s.raw, rules);
-        const short = s.short ? applyRulesShort(s.short, rules) : '— нет номера дома —';
         const a = document.createElement('div');
-        a.textContent = short;
-        a.style.whiteSpace = 'pre';
-        a.style.fontWeight = 'bold';
+        a.style.cssText = 'white-space:pre;font-weight:bold';
+        if (res.skipped) { a.textContent = '— пропущен правилом —'; a.style.color = '#c62828'; }
+        else if (!res.short) { a.textContent = '— не нашёл номер дома —'; a.style.color = '#b26a00'; }
+        else a.textContent = res.short;
         const b = document.createElement('div');
-        b.textContent = full;
-        b.style.color = full === s.raw ? '#777' : '#1a7f37';
+        b.style.color = '#777';
+        b.textContent = raw;
         row.append(a, b);
         preview.append(row);
       }
@@ -298,8 +354,15 @@
     };
     const close = () => overlay.remove();
     actions.append(
-      act('Сохранить', () => { setRulesText(area.value); close(); }, true),
+      act('Сохранить', () => {
+        if (parseRules(area.value).errors.length && !confirm('В правилах есть ошибки, такие строки будут пропущены. Сохранить?')) return;
+        setRulesText(area.value);
+        close();
+      }, true),
       act('Отмена', close),
+      act('Вернуть стандартные', () => {
+        if (confirm('Заменить текущие правила стандартными?')) { area.value = DEFAULT_RULES; updatePreview(); }
+      }),
       act('Загрузить из файла…', () => {
         const input = document.createElement('input');
         input.type = 'file';
@@ -311,7 +374,7 @@
         };
         input.click();
       }),
-      act('Сохранить в файл', () => download('автозамена.txt', area.value, 'text/plain;charset=utf-8')),
+      act('Сохранить в файл', () => download('правила.txt', area.value, 'text/plain;charset=utf-8')),
     );
 
     cols.append(area, preview);
@@ -342,12 +405,12 @@
       if (!cats.has(f.properties.category)) continue;
       const o = f.properties.options || {};
       const raw = fullAddress(o);
-      const short = raw ? shortAddress(raw) : null;
-      if (!short && !state.withoutNumber) continue;
+      const res = raw ? addressRow(raw) : { short: null };
+      if (res.skipped || (!res.short && !state.withoutNumber)) continue;
       const ring = outerRing(f.geometry);
       if (!ring) continue;
       const [lon, lat] = toLonLat(ringPoint(ring));
-      rows.push({ f, o, lat, lon, full: applyRules(raw), short: short && applyRulesShort(short) });
+      rows.push({ f, o, lat, lon, full: raw, short: res.short });
     }
     return rows;
   }
@@ -386,7 +449,7 @@
           category: r.f.properties.categoryName,
           address: r.full,
           short_address: r.short || '',
-          purpose: applyRules(r.o.purpose || r.o.params_purpose || r.o.land_record_category_type || ''),
+          purpose: r.o.purpose || r.o.params_purpose || r.o.land_record_category_type || '',
           floors: r.o.floors || r.o.params_floors || '',
           lat: r.lat,
           lon: r.lon,
@@ -465,8 +528,8 @@
 
   function renderRules() {
     if (!rulesEl) return;
-    const { rules } = state.replacements;
-    rulesEl.textContent = rules.length ? `Автозамена: правил ${rules.length}` : 'Автозамена: нет правил';
+    const { rules, errors } = state.rules;
+    rulesEl.textContent = `Правил обработки: ${rules.length}` + (errors.length ? `, с ошибками: ${errors.length}` : '');
   }
 
   function setStatus(text) {
@@ -535,7 +598,7 @@
     rulesEl.style.cssText = 'margin-top:8px;font-size:12px';
     body.append(
       rulesEl,
-      button('Настроить автозамену…', openRulesEditor),
+      button('Правила обработки…', openRulesEditor),
     );
     renderRules();
 
@@ -551,5 +614,5 @@
   if (document.body) buildPanel();
   else document.addEventListener('DOMContentLoaded', buildPanel);
 
-  window.__nspdToNyak = { shortAddress, ringPoint, toLonLat, outerRing, parseRules, applyRules, state };
+  window.__nspdToNyak = { shortAddress, ringPoint, toLonLat, outerRing, parseRules, processAddress, addressRow, DEFAULT_RULES, state };
 })();
