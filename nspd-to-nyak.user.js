@@ -305,6 +305,7 @@ re: \\bснт\\b => СНТ
     const area = document.createElement('textarea');
     area.value = state.rules.text;
     area.spellcheck = false;
+    area.wrap = 'off';
     area.style.cssText = 'flex:1;min-height:320px;padding:8px;border:1px solid #bbb;border-radius:6px;font:13px monospace;resize:vertical';
 
     const preview = document.createElement('div');
