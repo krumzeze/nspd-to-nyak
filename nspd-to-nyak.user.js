@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         НСПД → НЯК
 // @namespace    nspd-to-nyak
-// @version      0.3.0
+// @version      0.4.0
 // @description  Сохраняет здания, сооружения и адреса с nspd.gov.ru в CSV и GeoJSON
 // @match        https://nspd.gov.ru/*
 // @updateURL    https://raw.githubusercontent.com/krumzeze/nspd-to-nyak/main/nspd-to-nyak.user.js
@@ -183,52 +183,143 @@
 
   // ---------- replacements ----------
 
-  const RULES_KEY = 'nspdToNyak.rules';
-
-  function loadRules() {
-    try {
-      const saved = JSON.parse(localStorage.getItem(RULES_KEY));
-      if (saved && Array.isArray(saved.rules)) return saved;
-    } catch (e) { /* ignore */ }
-    return { name: '', rules: [] };
-  }
+  const RULES_KEY = 'nspdToNyak.rulesText';
+  const RULES_HELP = '# Одна строка — одно правило: что заменить => на что заменить\n# Пустая правая часть удаляет текст. Строки с # не учитываются.\n';
 
   function parseRules(text) {
     const rules = [];
     for (const line of text.replace(/^﻿/, '').split(/\r?\n/)) {
       if (!line.trim() || line.trim().startsWith('#')) continue;
-      const m = line.match(/^(.*?)\s*(?:=>|\t|;)\s*(.*)$/);
-      if (m && m[1].trim()) rules.push([m[1].trim(), m[2].trim()]);
+      const m = line.match(/^(.*?)(?: ?=> ?|\t|;)(.*)$/);
+      if (m && m[1].trim()) rules.push([m[1], m[2]]);
     }
     return rules;
   }
 
-  function applyRules(s) {
+  function applyRules(s, rules = state.replacements.rules) {
     if (!s) return s;
-    for (const [from, to] of state.replacements.rules) s = s.split(from).join(to);
+    for (const [from, to] of rules) s = s.split(from).join(to);
     return cleanSpaces(s);
   }
 
-  state.replacements = loadRules();
-
-  function pickRulesFile() {
-    const input = document.createElement('input');
-    input.type = 'file';
-    input.accept = '.txt,.csv,text/plain';
-    input.onchange = async () => {
-      const file = input.files[0];
-      if (!file) return;
-      state.replacements = { name: file.name, rules: parseRules(await file.text()) };
-      try { localStorage.setItem(RULES_KEY, JSON.stringify(state.replacements)); } catch (e) { /* ignore */ }
-      renderRules();
-    };
-    input.click();
+  function applyRulesShort(s, rules = state.replacements.rules) {
+    if (!s) return s;
+    const i = s.indexOf('  ');
+    if (i < 0) return applyRules(s, rules);
+    return `${applyRules(s.slice(0, i), rules)}  ${applyRules(s.slice(i + 2), rules)}`;
   }
 
-  function resetRules() {
-    state.replacements = { name: '', rules: [] };
-    try { localStorage.removeItem(RULES_KEY); } catch (e) { /* ignore */ }
+  function setRulesText(text) {
+    state.replacements = { text, rules: parseRules(text) };
+    try { localStorage.setItem(RULES_KEY, text); } catch (e) { /* ignore */ }
     renderRules();
+    render();
+  }
+
+  state.replacements = (() => {
+    let text = RULES_HELP;
+    try { text = localStorage.getItem(RULES_KEY) ?? RULES_HELP; } catch (e) { /* ignore */ }
+    return { text, rules: parseRules(text) };
+  })();
+
+  function previewSamples(limit) {
+    const cats = new Set(LAYERS.filter((l) => l.on).map((l) => l.id));
+    const out = [];
+    for (const f of state.features.values()) {
+      if (!cats.has(f.properties.category)) continue;
+      const raw = fullAddress(f.properties.options || {});
+      if (!raw) continue;
+      out.push({ raw, short: shortAddress(raw) });
+      if (out.length >= limit) break;
+    }
+    return out;
+  }
+
+  function openRulesEditor() {
+    const overlay = document.createElement('div');
+    overlay.style.cssText = 'position:fixed;inset:0;z-index:2147483647;background:rgba(0,0,0,.4);display:flex;align-items:center;justify-content:center;font:13px sans-serif;color:#222';
+    const box = document.createElement('div');
+    box.style.cssText = 'width:min(900px,94vw);max-height:90vh;display:flex;flex-direction:column;gap:8px;padding:14px;background:#fff;border-radius:10px;box-shadow:0 4px 24px rgba(0,0,0,.3)';
+
+    const title = document.createElement('div');
+    title.style.cssText = 'font-weight:bold;font-size:15px';
+    title.textContent = 'Автозамена';
+
+    const hint = document.createElement('div');
+    hint.style.color = '#555';
+    hint.textContent = 'Пишите по правилу на строку: что заменить => на что заменить. Справа видно, как изменятся адреса из текущей выборки.';
+
+    const cols = document.createElement('div');
+    cols.style.cssText = 'display:flex;gap:10px;min-height:0;flex:1';
+
+    const area = document.createElement('textarea');
+    area.value = state.replacements.text;
+    area.spellcheck = false;
+    area.style.cssText = 'flex:1;min-height:320px;padding:8px;border:1px solid #bbb;border-radius:6px;font:13px monospace;resize:vertical';
+
+    const preview = document.createElement('div');
+    preview.style.cssText = 'flex:1;min-height:320px;max-height:60vh;overflow:auto;padding:8px;border:1px solid #eee;border-radius:6px;background:#fafafa;font-size:12px';
+
+    const samples = previewSamples(40);
+    function updatePreview() {
+      const rules = parseRules(area.value);
+      preview.textContent = '';
+      if (!samples.length) {
+        preview.textContent = 'Сначала выделите объекты на карте, тогда здесь появятся примеры.';
+        return;
+      }
+      for (const s of samples) {
+        const row = document.createElement('div');
+        row.style.cssText = 'padding:4px 0;border-bottom:1px solid #eee';
+        const full = applyRules(s.raw, rules);
+        const short = s.short ? applyRulesShort(s.short, rules) : '— нет номера дома —';
+        const a = document.createElement('div');
+        a.textContent = short;
+        a.style.whiteSpace = 'pre';
+        a.style.fontWeight = 'bold';
+        const b = document.createElement('div');
+        b.textContent = full;
+        b.style.color = full === s.raw ? '#777' : '#1a7f37';
+        row.append(a, b);
+        preview.append(row);
+      }
+    }
+    area.oninput = updatePreview;
+    updatePreview();
+
+    const actions = document.createElement('div');
+    actions.style.cssText = 'display:flex;gap:8px;flex-wrap:wrap';
+    const act = (text, onClick, primary) => {
+      const b = button(text, onClick);
+      b.style.width = 'auto';
+      b.style.padding = '6px 12px';
+      if (primary) { b.style.background = '#2f6fdf'; b.style.color = '#fff'; }
+      return b;
+    };
+    const close = () => overlay.remove();
+    actions.append(
+      act('Сохранить', () => { setRulesText(area.value); close(); }, true),
+      act('Отмена', close),
+      act('Загрузить из файла…', () => {
+        const input = document.createElement('input');
+        input.type = 'file';
+        input.accept = '.txt,.csv,text/plain';
+        input.onchange = async () => {
+          if (!input.files[0]) return;
+          area.value = await input.files[0].text();
+          updatePreview();
+        };
+        input.click();
+      }),
+      act('Сохранить в файл', () => download('автозамена.txt', area.value, 'text/plain;charset=utf-8')),
+    );
+
+    cols.append(area, preview);
+    box.append(title, hint, cols, actions);
+    overlay.append(box);
+    overlay.onclick = (e) => { if (e.target === overlay) close(); };
+    document.body.append(overlay);
+    area.focus();
   }
 
   // ---------- collection ----------
@@ -256,7 +347,7 @@
       const ring = outerRing(f.geometry);
       if (!ring) continue;
       const [lon, lat] = toLonLat(ringPoint(ring));
-      rows.push({ f, o, lat, lon, full: applyRules(raw), short: short && applyRules(short) });
+      rows.push({ f, o, lat, lon, full: applyRules(raw), short: short && applyRulesShort(short) });
     }
     return rows;
   }
@@ -374,8 +465,8 @@
 
   function renderRules() {
     if (!rulesEl) return;
-    const { name, rules } = state.replacements;
-    rulesEl.textContent = rules.length ? `Автозамена: ${name} (${rules.length} правил)` : 'Автозамена: не загружена';
+    const { rules } = state.replacements;
+    rulesEl.textContent = rules.length ? `Автозамена: правил ${rules.length}` : 'Автозамена: нет правил';
   }
 
   function setStatus(text) {
@@ -444,8 +535,7 @@
     rulesEl.style.cssText = 'margin-top:8px;font-size:12px';
     body.append(
       rulesEl,
-      button('Загрузить файл автозамен…', pickRulesFile),
-      button('Сбросить автозамену', resetRules),
+      button('Настроить автозамену…', openRulesEditor),
     );
     renderRules();
 
