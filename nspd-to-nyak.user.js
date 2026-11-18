@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         НСПД → НЯК
 // @namespace    nspd-to-nyak
-// @version      0.2.0
+// @version      0.3.0
 // @description  Сохраняет здания, сооружения и адреса с nspd.gov.ru в CSV и GeoJSON
 // @match        https://nspd.gov.ru/*
 // @updateURL    https://raw.githubusercontent.com/krumzeze/nspd-to-nyak/main/nspd-to-nyak.user.js
@@ -181,6 +181,56 @@
     return `${house}  ${normalizeStreet(street)}`;
   }
 
+  // ---------- replacements ----------
+
+  const RULES_KEY = 'nspdToNyak.rules';
+
+  function loadRules() {
+    try {
+      const saved = JSON.parse(localStorage.getItem(RULES_KEY));
+      if (saved && Array.isArray(saved.rules)) return saved;
+    } catch (e) { /* ignore */ }
+    return { name: '', rules: [] };
+  }
+
+  function parseRules(text) {
+    const rules = [];
+    for (const line of text.replace(/^﻿/, '').split(/\r?\n/)) {
+      if (!line.trim() || line.trim().startsWith('#')) continue;
+      const m = line.match(/^(.*?)\s*(?:=>|\t|;)\s*(.*)$/);
+      if (m && m[1].trim()) rules.push([m[1].trim(), m[2].trim()]);
+    }
+    return rules;
+  }
+
+  function applyRules(s) {
+    if (!s) return s;
+    for (const [from, to] of state.replacements.rules) s = s.split(from).join(to);
+    return cleanSpaces(s);
+  }
+
+  state.replacements = loadRules();
+
+  function pickRulesFile() {
+    const input = document.createElement('input');
+    input.type = 'file';
+    input.accept = '.txt,.csv,text/plain';
+    input.onchange = async () => {
+      const file = input.files[0];
+      if (!file) return;
+      state.replacements = { name: file.name, rules: parseRules(await file.text()) };
+      try { localStorage.setItem(RULES_KEY, JSON.stringify(state.replacements)); } catch (e) { /* ignore */ }
+      renderRules();
+    };
+    input.click();
+  }
+
+  function resetRules() {
+    state.replacements = { name: '', rules: [] };
+    try { localStorage.removeItem(RULES_KEY); } catch (e) { /* ignore */ }
+    renderRules();
+  }
+
   // ---------- collection ----------
 
   function addFeatures(fc) {
@@ -200,13 +250,13 @@
     for (const f of state.features.values()) {
       if (!cats.has(f.properties.category)) continue;
       const o = f.properties.options || {};
-      const full = fullAddress(o);
-      const short = full ? shortAddress(full) : null;
+      const raw = fullAddress(o);
+      const short = raw ? shortAddress(raw) : null;
       if (!short && !state.withoutNumber) continue;
       const ring = outerRing(f.geometry);
       if (!ring) continue;
       const [lon, lat] = toLonLat(ringPoint(ring));
-      rows.push({ f, o, lat, lon, full, short });
+      rows.push({ f, o, lat, lon, full: applyRules(raw), short: short && applyRules(short) });
     }
     return rows;
   }
@@ -245,7 +295,7 @@
           category: r.f.properties.categoryName,
           address: r.full,
           short_address: r.short || '',
-          purpose: r.o.purpose || r.o.params_purpose || r.o.land_record_category_type || '',
+          purpose: applyRules(r.o.purpose || r.o.params_purpose || r.o.land_record_category_type || ''),
           floors: r.o.floors || r.o.params_floors || '',
           lat: r.lat,
           lon: r.lon,
@@ -320,7 +370,13 @@
 
   // ---------- UI ----------
 
-  let panel, statusEl;
+  let panel, statusEl, rulesEl;
+
+  function renderRules() {
+    if (!rulesEl) return;
+    const { name, rules } = state.replacements;
+    rulesEl.textContent = rules.length ? `Автозамена: ${name} (${rules.length} правил)` : 'Автозамена: не загружена';
+  }
 
   function setStatus(text) {
     if (statusEl) statusEl.textContent = text;
@@ -384,6 +440,15 @@
       button('Очистить', () => { state.features.clear(); render(); }),
     );
 
+    rulesEl = document.createElement('div');
+    rulesEl.style.cssText = 'margin-top:8px;font-size:12px';
+    body.append(
+      rulesEl,
+      button('Загрузить файл автозамен…', pickRulesFile),
+      button('Сбросить автозамену', resetRules),
+    );
+    renderRules();
+
     statusEl = document.createElement('div');
     statusEl.style.cssText = 'margin-top:6px;color:#555;font-size:12px';
     statusEl.textContent = 'Обведите область на карте или нажмите «Взять весь экран».';
@@ -396,5 +461,5 @@
   if (document.body) buildPanel();
   else document.addEventListener('DOMContentLoaded', buildPanel);
 
-  window.__nspdToNyak = { shortAddress, ringPoint, toLonLat, outerRing };
+  window.__nspdToNyak = { shortAddress, ringPoint, toLonLat, outerRing, parseRules, applyRules, state };
 })();
